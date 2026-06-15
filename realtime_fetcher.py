@@ -46,7 +46,7 @@ def fetch_aqi(city, lat, lon, start_date, end_date):
 
 def fetch_weather(city, lat, lon, start_date, end_date):
     url = (
-        f"https://api.open-meteo.com/v1/forecast?"
+        f"https://archive-api.open-meteo.com/v1/archive?"
         f"latitude={lat}&longitude={lon}"
         f"&start_date={start_date}&end_date={end_date}"
         f"&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation"
@@ -87,6 +87,8 @@ def fetch_all_cities():
     master = pd.merge(aqi, weather, on=["datetime", "city"], how="inner")
     master = master.sort_values(["city", "datetime"]).reset_index(drop=True)
     master["datetime"] = pd.to_datetime(master["datetime"])
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    master = master[master["datetime"] <= now_ist].copy()
     return master
 
 # ── Step 2: Feature engineering (mirrors your feature engineering script) ─────
@@ -198,7 +200,7 @@ def make_predictions(df, models, features):
     for _, row in latest.iterrows():
         x_row = pd.DataFrame([row[features].fillna(0)])
         pred_row = {
-            "prediction_time": (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S"),
+            "prediction_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "city"           : row["city"],
             "current_pm25"   : round(row["pm2_5"], 2),
             "current_datetime": row["datetime"].strftime("%Y-%m-%d %H:%M:%S"),
