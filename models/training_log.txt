@@ -1,0 +1,18 @@
+
+Model: target_1h
+  Best round : 456
+  Val RMSE   : 4.8452
+  Val MAE    : 2.6348
+  Val R²     : 0.9885
+
+Model: target_24h
+  Best round : 61
+  Val RMSE   : 21.9816
+  Val MAE    : 15.1248
+  Val R²     : 0.7587
+
+Model: target_48h
+  Best round : 55
+  Val RMSE   : 25.1063
+  Val MAE    : 17.9045
+  Val R²     : 0.6777

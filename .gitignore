@@ -1,0 +1,20 @@
+# Large data files
+data/raw/
+data/processed/
+data/train.csv
+data/val.csv
+data/test.csv
+
+# Result files
+results/shap_values_1h.csv
+results/shap_values_24h.csv
+results/shap_values_48h.csv
+results/predictions_1h.csv
+results/predictions_24h.csv
+results/predictions_48h.csv
+
+# Python
+__pycache__/
+*.pyc
+.DS_Store
+aqi_env/
