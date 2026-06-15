@@ -198,7 +198,7 @@ def make_predictions(df, models, features):
     for _, row in latest.iterrows():
         x_row = pd.DataFrame([row[features].fillna(0)])
         pred_row = {
-            "prediction_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "prediction_time": (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S"),
             "city"           : row["city"],
             "current_pm25"   : round(row["pm2_5"], 2),
             "current_datetime": row["datetime"].strftime("%Y-%m-%d %H:%M:%S"),
