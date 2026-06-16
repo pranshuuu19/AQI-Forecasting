@@ -1,9 +1,19 @@
+"""
+Real-Time Fetcher v2 — AQI Forecasting System
+===============================================
+FIXES:
+  - current_datetime always shows the most recent PAST hour correctly
+  - No duplicate rows for same hour
+  - Actuals filled correctly
+  - Kolkata timeout handled with retry
+  - Clean 5 rows per run, every hour
+"""
+
 import requests # type: ignore
 import pandas as pd # type: ignore
 import numpy as np # type: ignore
 import json
 import os
-import joblib # type: ignore
 import xgboost as xgb # type: ignore
 from datetime import datetime, timedelta
 import warnings
@@ -21,7 +31,19 @@ CITIES = {
 PREDICTIONS_LOG = "data/predictions_log.csv"
 os.makedirs("data", exist_ok=True)
 
-# ── Step 1: Fetch latest 3 days from Open-Meteo ───────────────────────────────
+# ── Fetch with retry ──────────────────────────────────────────────────────────
+def fetch_with_retry(url, retries=3, timeout=30):
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            print(f"    Attempt {attempt+1} failed: {e}")
+            if attempt == retries - 1:
+                raise
+    
+# ── Fetch AQI ─────────────────────────────────────────────────────────────────
 def fetch_aqi(city, lat, lon, start_date, end_date):
     url = (
         f"https://air-quality-api.open-meteo.com/v1/air-quality?"
@@ -30,11 +52,9 @@ def fetch_aqi(city, lat, lon, start_date, end_date):
         f"&hourly=pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,ozone,sulphur_dioxide"
         f"&timezone=Asia/Kolkata"
     )
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    d = r.json()
+    d = fetch_with_retry(url)
     return pd.DataFrame({
-        "datetime": d["hourly"]["time"],
+        "datetime": pd.to_datetime(d["hourly"]["time"]),
         "city"    : city,
         "pm2_5"   : d["hourly"]["pm2_5"],
         "pm10"    : d["hourly"]["pm10"],
@@ -44,6 +64,7 @@ def fetch_aqi(city, lat, lon, start_date, end_date):
         "so2"     : d["hourly"]["sulphur_dioxide"],
     })
 
+# ── Fetch Weather ─────────────────────────────────────────────────────────────
 def fetch_weather(city, lat, lon, start_date, end_date):
     url = (
         f"https://archive-api.open-meteo.com/v1/archive?"
@@ -52,11 +73,9 @@ def fetch_weather(city, lat, lon, start_date, end_date):
         f"&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation"
         f"&timezone=Asia/Kolkata"
     )
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    d = r.json()
+    d = fetch_with_retry(url)
     return pd.DataFrame({
-        "datetime"   : d["hourly"]["time"],
+        "datetime"   : pd.to_datetime(d["hourly"]["time"]),
         "city"       : city,
         "temperature": d["hourly"]["temperature_2m"],
         "humidity"   : d["hourly"]["relative_humidity_2m"],
@@ -64,10 +83,19 @@ def fetch_weather(city, lat, lon, start_date, end_date):
         "rainfall"   : d["hourly"]["precipitation"],
     })
 
+# ── Fetch all cities ──────────────────────────────────────────────────────────
 def fetch_all_cities():
-    # Fetch 5 days back to ensure enough history for lag48
-    end_date   = datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+    # Current time in IST
+    now_ist    = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    # Most recent completed hour in IST
+    current_hour_ist = now_ist.replace(minute=0, second=0, microsecond=0)
+    
+    # Fetch 6 days back to cover lag48 + rolling24
+    end_date   = current_hour_ist.strftime("%Y-%m-%d")
+    start_date = (current_hour_ist - timedelta(days=6)).strftime("%Y-%m-%d")
+
+    print(f"  Fetching data from {start_date} to {end_date}")
+    print(f"  Current IST hour: {current_hour_ist}")
 
     aqi_frames     = []
     weather_frames = []
@@ -75,49 +103,54 @@ def fetch_all_cities():
     for city, (lat, lon) in CITIES.items():
         print(f"  Fetching {city}...")
         try:
-            aqi_frames.append(fetch_aqi(city, lat, lon, start_date, end_date))
-            weather_frames.append(fetch_weather(city, lat, lon, start_date, end_date))
+            aqi_df     = fetch_aqi(city, lat, lon, start_date, end_date)
+            weather_df = fetch_weather(city, lat, lon, start_date, end_date)
+            aqi_frames.append(aqi_df)
+            weather_frames.append(weather_df)
         except Exception as e:
             print(f"  ⚠ Failed for {city}: {e}")
+
+    if not aqi_frames:
+        raise Exception("All city fetches failed")
 
     aqi     = pd.concat(aqi_frames,     ignore_index=True)
     weather = pd.concat(weather_frames, ignore_index=True)
 
-    # Merge exactly like your merger script
+    # Merge on city + datetime
     master = pd.merge(aqi, weather, on=["datetime", "city"], how="inner")
     master = master.sort_values(["city", "datetime"]).reset_index(drop=True)
-    master["datetime"] = pd.to_datetime(master["datetime"])
-    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    master = master[master["datetime"] <= now_ist].copy()
-    return master
 
-# ── Step 2: Feature engineering (mirrors your feature engineering script) ─────
+    # ── KEY FIX: Keep only rows UP TO current completed hour ─────────────────
+    # Archive API has ~5hr lag so weather only goes up to ~5hrs ago
+    # AQI API goes up to current hour
+    # Take the minimum latest timestamp across both to ensure both have data
+    latest_weather = master.groupby("city")["datetime"].max().min()
+    cutoff = min(latest_weather, current_hour_ist)
+    
+    print(f"  Data cutoff: {cutoff}")
+    master = master[master["datetime"] <= cutoff].copy()
+
+    return master, cutoff
+
+# ── Feature engineering ───────────────────────────────────────────────────────
 def engineer_features(df):
     df = df.copy()
-
-    # Time features
     df["hour"]        = df["datetime"].dt.hour
     df["day_of_week"] = df["datetime"].dt.dayofweek
     df["month"]       = df["datetime"].dt.month
     df["is_weekend"]  = (df["day_of_week"] >= 5).astype(int)
 
-    # Lag features — computed per city
     for col in ["pm2_5", "pm10", "no2", "co", "o3", "so2"]:
         df[f"{col}_lag1"]  = df.groupby("city")[col].shift(1)
         df[f"{col}_lag24"] = df.groupby("city")[col].shift(24)
         df[f"{col}_lag48"] = df.groupby("city")[col].shift(48)
 
-    # Rolling features
     df["pm2_5_rolling6"]  = df.groupby("city")["pm2_5"].transform(
         lambda x: x.rolling(6,  min_periods=1).mean())
     df["pm2_5_rolling24"] = df.groupby("city")["pm2_5"].transform(
         lambda x: x.rolling(24, min_periods=1).mean())
-
-    # Rate of change
     df["pm2_5_change_1h"]  = df.groupby("city")["pm2_5"].diff(1)
     df["pm2_5_change_24h"] = df.groupby("city")["pm2_5"].diff(24)
-
-    # Rolling std/max/min
     df["pm2_5_rolling6_std"]  = df.groupby("city")["pm2_5"].transform(
         lambda x: x.rolling(6,  min_periods=1).std().fillna(0))
     df["pm2_5_rolling24_max"] = df.groupby("city")["pm2_5"].transform(
@@ -125,32 +158,27 @@ def engineer_features(df):
     df["pm2_5_rolling24_min"] = df.groupby("city")["pm2_5"].transform(
         lambda x: x.rolling(24, min_periods=1).min())
 
-    # Interaction features
-    df["humidity_pm25"]        = df["humidity"] * df["pm2_5"]
-    df["wind_pm25_ratio"]      = df["pm2_5"] / (df["wind_speed"] + 1)
-    df["temp_wind_interaction"] = df["temperature"] * df["wind_speed"]
+    df["humidity_pm25"]         = df["humidity"] * df["pm2_5"]
+    df["wind_pm25_ratio"]       = df["pm2_5"] / (df["wind_speed"] + 1)
+    df["temp_wind_interaction"]  = df["temperature"] * df["wind_speed"]
 
-    # Pollution spike flag
     city_means = df.groupby("city")["pm2_5"].transform("mean")
     city_stds  = df.groupby("city")["pm2_5"].transform("std")
     df["is_pollution_spike"] = (df["pm2_5"] > city_means + 2 * city_stds).astype(int)
 
-    # Festival flags
     df["date_str"] = df["datetime"].dt.date.astype(str)
     diwali_exact  = ["2025-10-20", "2025-10-21"]
     diwali_window = ["2025-10-17","2025-10-18","2025-10-19",
                      "2025-10-20","2025-10-21",
                      "2025-10-22","2025-10-23","2025-10-24"]
-    df["is_diwali"]         = df["date_str"].isin(diwali_exact).astype(int)
-    df["is_diwali_window"]  = df["date_str"].isin(diwali_window).astype(int)
+    df["is_diwali"]          = df["date_str"].isin(diwali_exact).astype(int)
+    df["is_diwali_window"]   = df["date_str"].isin(diwali_window).astype(int)
     df["is_stubble_burning"] = df["month"].isin([10, 11]).astype(int)
     df = df.drop(columns=["date_str"])
 
-    # City encoding — same order as training
     city_order = {"Bengaluru": 0, "Chennai": 1, "Delhi": 2, "Kolkata": 3, "Mumbai": 4}
     df["city_encoded"] = df["city"].map(city_order)
 
-    # Hour buckets
     def hour_bucket(h):
         if 6 <= h <= 9:     return "morning_rush"
         elif 10 <= h <= 16: return "daytime"
@@ -160,7 +188,6 @@ def engineer_features(df):
     df["hour_bucket"] = df["hour"].apply(hour_bucket)
     df = pd.get_dummies(df, columns=["hour_bucket"], dtype=int)
 
-    # Ensure all hour bucket columns exist even if some buckets absent in small window
     for bucket in ["hour_bucket_daytime","hour_bucket_evening_rush",
                    "hour_bucket_morning_rush","hour_bucket_night"]:
         if bucket not in df.columns:
@@ -168,7 +195,7 @@ def engineer_features(df):
 
     return df
 
-# ── Step 3: Load models + feature config ──────────────────────────────────────
+# ── Load models ───────────────────────────────────────────────────────────────
 def load_models():
     models = {}
     for h in ["1h", "24h", "48h"]:
@@ -185,127 +212,130 @@ def load_features():
     with open("data/feature_config.json") as f:
         return json.load(f)["feature_cols"]
 
-# ── Step 4: Make predictions for latest row per city ─────────────────────────
-def make_predictions(df, models, features):
-    # Take the most recent row per city
-    latest = df.sort_values("datetime").groupby("city").tail(1).copy()
+# ── Make predictions ──────────────────────────────────────────────────────────
+def make_predictions(df, models, features, cutoff):
+    # Take EXACTLY the cutoff hour row per city
+    latest = df[df["datetime"] == cutoff].copy()
+    
+    # If cutoff hour missing for some city, take their latest available
+    cities_missing = set(CITIES.keys()) - set(latest["city"].values)
+    if cities_missing:
+        for city in cities_missing:
+            city_rows = df[df["city"] == city]
+            if len(city_rows) > 0:
+                latest = pd.concat([latest, city_rows.iloc[[-1]]], ignore_index=True)
 
-    # Align feature columns
-    for f in features:
-        if f not in latest.columns:
-            latest[f] = 0
-    X = latest[features].fillna(0)
+    prediction_time = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
 
     results = []
     for _, row in latest.iterrows():
-        x_row = pd.DataFrame([row[features].fillna(0)])
+        # Ensure all features present
+        for f in features:
+            if f not in row.index:
+                row[f] = 0
+        x_row = pd.DataFrame([row[features]]).fillna(0)
+
         pred_row = {
-            "prediction_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "city"           : row["city"],
-            "current_pm25"   : round(row["pm2_5"], 2),
+            "prediction_time" : (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S"),
+            "city"            : row["city"],
+            "current_pm25"    : round(row["pm2_5"], 2),
             "current_datetime": row["datetime"].strftime("%Y-%m-%d %H:%M:%S"),
-            "target_time_1h" : (row["datetime"] + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
-            "target_time_24h": (row["datetime"] + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S"),
-            "target_time_48h": (row["datetime"] + timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S"),
-            "pred_1h"        : round(float(models["1h"].predict(x_row)[0]), 2) if "1h"  in models else None,
-            "pred_24h"       : round(float(models["24h"].predict(x_row)[0]), 2) if "24h" in models else None,
-            "pred_48h"       : round(float(models["48h"].predict(x_row)[0]), 2) if "48h" in models else None,
-            "actual_1h"      : None,  # filled in retrospectively
-            "actual_24h"     : None,
-            "actual_48h"     : None,
-            "error_1h"       : None,
-            "error_24h"      : None,
-            "error_48h"      : None,
+            "target_time_1h"  : (row["datetime"] + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
+            "target_time_24h" : (row["datetime"] + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S"),
+            "target_time_48h" : (row["datetime"] + timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S"),
+            "pred_1h"  : round(float(models["1h"].predict(x_row)[0]),  2) if "1h"  in models else None,
+            "pred_24h" : round(float(models["24h"].predict(x_row)[0]), 2) if "24h" in models else None,
+            "pred_48h" : round(float(models["48h"].predict(x_row)[0]), 2) if "48h" in models else None,
+            "actual_1h" : None, "actual_24h": None, "actual_48h": None,
+            "error_1h"  : None, "error_24h" : None, "error_48h" : None,
         }
         results.append(pred_row)
-        print(f"  {row['city']:10} | Current: {row['pm2_5']:.1f} | "
-              f"1h: {pred_row['pred_1h']} | 24h: {pred_row['pred_24h']} | "
+        print(f"  {row['city']:10} | {row['datetime']} | "
+              f"Current: {row['pm2_5']:.1f} | "
+              f"1h: {pred_row['pred_1h']} | "
+              f"24h: {pred_row['pred_24h']} | "
               f"48h: {pred_row['pred_48h']} μg/m³")
 
     return pd.DataFrame(results)
 
-# ── Step 5: Retrospective evaluation ─────────────────────────────────────────
+# ── Fill actuals retrospectively ──────────────────────────────────────────────
 def fill_actuals(log_df, fresh_df):
-    """
-    For each past prediction whose target_time has now passed,
-    find the actual pm2_5 from fresh data and compute the error.
-    """
-    now = datetime.now()
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
 
     for idx, row in log_df.iterrows():
         city      = row["city"]
         city_data = fresh_df[fresh_df["city"] == city].copy()
 
         for horizon in ["1h", "24h", "48h"]:
-            # Skip if already filled or prediction missing
             if pd.notna(row.get(f"actual_{horizon}")) or pd.isna(row.get(f"pred_{horizon}")):
                 continue
 
             target_time = pd.to_datetime(row[f"target_time_{horizon}"])
-
-            # Only evaluate if target time has passed
-            if target_time > now:
+            if target_time > now_ist:
                 continue
 
-            # Find actual value — closest row within 30 min of target time
+            # Find closest actual within 30 min
             city_data["time_diff"] = (city_data["datetime"] - target_time).abs()
             closest = city_data.nsmallest(1, "time_diff")
 
-            if len(closest) > 0 and closest.iloc[0]["time_diff"] < timedelta(minutes=30):
-                actual = round(closest.iloc[0]["pm2_5"], 2)
+            if len(closest) > 0 and closest.iloc[0]["time_diff"] < timedelta(minutes=31):
+                actual = round(float(closest.iloc[0]["pm2_5"]), 2)
                 error  = round(float(row[f"pred_{horizon}"]) - actual, 2)
                 log_df.at[idx, f"actual_{horizon}"] = actual
                 log_df.at[idx, f"error_{horizon}"]  = error
 
     return log_df
 
-# ── Step 6: Save updated log ──────────────────────────────────────────────────
-def update_log(new_preds):
-    if os.path.exists(PREDICTIONS_LOG):
-        existing = pd.read_csv(PREDICTIONS_LOG)
-        updated  = pd.concat([existing, new_preds], ignore_index=True)
-    else:
-        updated = new_preds
-    updated.to_csv(PREDICTIONS_LOG, index=False)
-    return updated
+# ── Deduplicate log ───────────────────────────────────────────────────────────
+def deduplicate_log(log_df):
+    """Remove duplicate rows for same city + current_datetime — keep latest."""
+    log_df = log_df.sort_values("prediction_time")
+    log_df = log_df.drop_duplicates(
+        subset=["city", "current_datetime"], keep="last"
+    ).reset_index(drop=True)
+    return log_df
 
-# ── MAIN ──────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
     print(f"\n{'='*55}")
-    print(f"  AQI Real-Time Fetcher — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"  AQI Real-Time Fetcher v2 — {now_ist.strftime('%Y-%m-%d %H:%M')} IST")
     print(f"{'='*55}")
 
-    print("\n[1/5] Fetching latest data from Open-Meteo...")
-    fresh_df = fetch_all_cities()
-    print(f"  Fetched {len(fresh_df)} rows across {fresh_df['city'].nunique()} cities")
+    print("\n[1/5] Fetching latest data...")
+    fresh_df, cutoff = fetch_all_cities()
+    print(f"  {len(fresh_df)} rows fetched, cutoff hour: {cutoff}")
 
     print("\n[2/5] Engineering features...")
     featured_df = engineer_features(fresh_df)
-    print("  Done")
 
     print("\n[3/5] Loading models...")
     models   = load_models()
     features = load_features()
-    print(f"  Loaded models: {list(models.keys())}")
+    print(f"  Models loaded: {list(models.keys())}")
 
-    print("\n[4/5] Making predictions...")
-    new_preds = make_predictions(featured_df, models, features)
+    print("\n[4/5] Making predictions for cutoff hour...")
+    new_preds = make_predictions(featured_df, models, features, cutoff)
 
-    print("\n[5/5] Updating prediction log + filling actuals...")
-    log_df  = update_log(new_preds)
-    log_df  = fill_actuals(log_df, fresh_df)
+    print("\n[5/5] Updating log + filling actuals + deduplicating...")
+    if os.path.exists(PREDICTIONS_LOG):
+        existing = pd.read_csv(PREDICTIONS_LOG)
+        log_df   = pd.concat([existing, new_preds], ignore_index=True)
+    else:
+        log_df = new_preds
+
+    log_df = deduplicate_log(log_df)
+    log_df = fill_actuals(log_df, fresh_df)
+    log_df = deduplicate_log(log_df)  # dedupe again after actuals filled
     log_df.to_csv(PREDICTIONS_LOG, index=False)
 
-    # Summary
-    total      = len(log_df)
-    evaluated  = log_df["actual_1h"].notna().sum()
+    total     = len(log_df)
+    evaluated = log_df["actual_1h"].notna().sum()
+    print(f"\n  Total rows in log : {total}")
+    print(f"  1h actuals filled : {evaluated}")
     if evaluated > 0:
-        rmse_live = np.sqrt((log_df["error_1h"].dropna() ** 2).mean())
-        print(f"\n  Predictions logged : {total}")
-        print(f"  1h predictions evaluated so far: {evaluated}")
-        print(f"  Live 1h RMSE so far: {rmse_live:.4f} μg/m³")
-    else:
-        print(f"\n  Predictions logged: {total}")
-        print(f"  No actuals available yet — check back in 1 hour")
+        errors = log_df["error_1h"].dropna()
+        rmse   = np.sqrt((errors**2).mean())
+        print(f"  Live 1h RMSE      : {rmse:.4f} μg/m³")
 
     print(f"\n✓ Done. Log saved to {PREDICTIONS_LOG}")
