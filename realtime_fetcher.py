@@ -57,7 +57,7 @@ def fetch_aqi(city, lat, lon, start_date, end_date):
 # ── Fetch Weather ─────────────────────────────────────────────────────────────
 def fetch_weather(city, lat, lon, start_date, end_date):
     url = (
-        f"https://archive-api.open-meteo.com/v1/archive?"
+        f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={lat}&longitude={lon}"
         f"&start_date={start_date}&end_date={end_date}"
         f"&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation"
@@ -81,7 +81,7 @@ def fetch_all_cities():
     current_hour_ist = now_ist.replace(minute=0, second=0, microsecond=0)
     
     # Fetch 6 days back to cover lag48 + rolling24
-    end_date   = current_hour_ist.strftime("%Y-%m-%d")
+    end_date = (current_hour_ist + timedelta(days=1)).strftime("%Y-%m-%d")
     start_date = (current_hour_ist - timedelta(days=6)).strftime("%Y-%m-%d")
 
     print(f"  Fetching data from {start_date} to {end_date}")

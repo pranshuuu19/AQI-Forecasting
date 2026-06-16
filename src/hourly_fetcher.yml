@@ -1,0 +1,40 @@
+name: Hourly AQI Fetcher
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # runs every hour at :00
+  workflow_dispatch:        # allows manual trigger from GitHub UI
+
+jobs:
+  fetch-and-predict:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1 — checkout your repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2 — set up Python with your aqi_env packages
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Step 3 — install dependencies
+      - name: Install dependencies
+        run: |
+          pip install requests pandas numpy xgboost scikit-learn joblib
+
+      # Step 4 — run the fetcher
+      - name: Run real-time fetcher
+        run: python realtime_fetcher.py
+
+      # Step 5 — commit updated predictions_log.csv back to repo
+      # This is how the dashboard always reads fresh data
+      - name: Commit updated prediction log
+        run: |
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/predictions_log.csv
+          git diff --staged --quiet || git commit -m "Auto: hourly predictions update"
+          git push
