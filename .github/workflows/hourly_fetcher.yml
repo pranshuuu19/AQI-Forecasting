@@ -8,15 +8,20 @@ on:
 jobs:
   fetch-and-predict:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -29,6 +34,7 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
           git add data/predictions_log.csv
-          git diff --staged --quiet || git commit -m "Auto: hourly predictions update"
-          git push
+          git diff --staged --quiet || git commit -m "Auto: predictions $(date -u '+%Y-%m-%d %H:%M') UTC"
+          git push origin main
