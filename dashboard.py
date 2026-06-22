@@ -594,7 +594,16 @@ if page == "🔮 Live Forecast":
 
     # ── Self-log this prediction + evaluate past ones ────────────────────────
     log_prediction(selected_city, latest["datetime"], current_pm25, pred_1h, pred_24h, pred_48h)
-    evaluate_past_predictions({selected_city: live_df})
+    # Evaluate pending predictions for ALL cities, not just the selected one,
+    # so visiting any city resolves everyone's due predictions.
+    all_city_data = {selected_city: live_df}
+    for other_city in CITIES.keys():
+        if other_city == selected_city:
+            continue
+        cached_df, cached_err = fetch_live_data(other_city)
+        if cached_df is not None:
+            all_city_data[other_city] = cached_df
+    evaluate_past_predictions(all_city_data)
 
     # ── Pollution spike alert ─────────────────────────────────────────────────
     worst_future_label = cur_label
@@ -989,9 +998,39 @@ elif page == "⚡ Real-Time Eval":
     <div class="card-sm" style="background:#1E2A3A;border-left:3px solid #3B82F6;margin-bottom:16px;">
         <div style="font-size:12px;color:#9CA3AF;">
             ℹ️ This log grows automatically every time you open the Live Forecast page for any city.
-            Visit a few cities on Page 1, then return here to see predictions accumulate and resolve over time.
+            Click "Refresh All Cities Now" below to fetch fresh data for all 5 cities at once and
+            resolve any predictions whose target time has passed — no need to visit each city tab.
         </div>
     </div>""", unsafe_allow_html=True)
+
+    col_refresh, col_spacer = st.columns([1, 4])
+    with col_refresh:
+        if st.button("🔄 Refresh All Cities Now", use_container_width=True, type="primary"):
+            with st.spinner("Fetching all 5 cities, logging predictions and resolving due actuals..."):
+                all_city_data = {}
+                for c in CITIES.keys():
+                    cdf, cerr = fetch_live_data(c)
+                    if cdf is not None and len(cdf) > 0:
+                        all_city_data[c] = cdf
+                        # Engineer features to get predictions for this city
+                        try:
+                            featured_c = engineer_features(cdf)
+                            latest_c   = featured_c.iloc[-1]
+                            for f in FEATURES:
+                                if f not in featured_c.columns:
+                                    featured_c[f] = 0
+                            x_c = pd.DataFrame([featured_c.iloc[-1][FEATURES]]).fillna(0)
+                            p1  = float(models["1h"].predict(x_c)[0])  if "1h"  in models else None
+                            p24 = float(models["24h"].predict(x_c)[0]) if "24h" in models else None
+                            p48 = float(models["48h"].predict(x_c)[0]) if "48h" in models else None
+                            log_prediction(c, latest_c["datetime"], float(latest_c["pm2_5"]), p1, p24, p48)
+                        except Exception as e:
+                            pass  # skip logging for this city if feature engineering fails
+                # Now evaluate all pending predictions with the fresh data
+                evaluate_past_predictions(all_city_data)
+                load_live_log.clear()
+            st.success("Refreshed — new predictions logged and actuals updated for any predictions now due.")
+            st.rerun()
 
     log_df = load_live_log()
 
@@ -1000,7 +1039,9 @@ elif page == "⚡ Real-Time Eval":
         st.stop()
 
     total_preds = len(log_df)
-    evaluated   = log_df["actual_1h"].notna().sum()
+    evaluated_1h  = log_df["actual_1h"].notna().sum()
+    evaluated_24h = log_df["actual_24h"].notna().sum()
+    evaluated_48h = log_df["actual_48h"].notna().sum()
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -1014,10 +1055,10 @@ elif page == "⚡ Real-Time Eval":
             <div class="metric-sub">of 5 total</div></div>""", unsafe_allow_html=True)
     with c3:
         st.markdown(f"""<div class="metric-card"><div class="metric-label">1h Evaluated</div>
-            <div class="metric-value" style="color:#F59E0B;">{evaluated}</div>
+            <div class="metric-value" style="color:#10B981;">{evaluated_1h}</div>
             <div class="metric-sub">predictions resolved</div></div>""", unsafe_allow_html=True)
     with c4:
-        if evaluated > 0:
+        if evaluated_1h > 0:
             live_rmse = np.sqrt((log_df["error_1h"].dropna()**2).mean())
             test_rmse = float(metrics[metrics["horizon"]=="1h"]["RMSE"].values[0])
             delta = live_rmse - test_rmse
@@ -1028,12 +1069,53 @@ elif page == "⚡ Real-Time Eval":
         else:
             st.markdown(f"""<div class="metric-card"><div class="metric-label">Live 1h RMSE</div>
                 <div class="metric-value" style="color:#4B5563;">—</div>
-                <div class="metric-sub">visit again in 1hr+</div></div>""", unsafe_allow_html=True)
+                <div class="metric-sub">click refresh after 1hr</div></div>""", unsafe_allow_html=True)
+
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+    # ── 24h and 48h evaluated counts + live RMSE ──────────────────────────────
+    st.markdown('<div class="section-header">Longer Horizon Evaluation</div>', unsafe_allow_html=True)
+    h24c1, h24c2, h48c1, h48c2 = st.columns(4)
+    with h24c1:
+        st.markdown(f"""<div class="metric-card"><div class="metric-label">24h Evaluated</div>
+            <div class="metric-value" style="color:#F59E0B;">{evaluated_24h}</div>
+            <div class="metric-sub">predictions resolved</div></div>""", unsafe_allow_html=True)
+    with h24c2:
+        if evaluated_24h > 0:
+            live_rmse_24h = np.sqrt((log_df["error_24h"].dropna()**2).mean())
+            test_rmse_24h = float(metrics[metrics["horizon"]=="24h"]["RMSE"].values[0])
+            delta24 = live_rmse_24h - test_rmse_24h
+            dcolor24 = "#10B981" if delta24 < 5 else "#EF4444"
+            st.markdown(f"""<div class="metric-card"><div class="metric-label">Live 24h RMSE</div>
+                <div class="metric-value" style="color:{dcolor24};">{live_rmse_24h:.2f}</div>
+                <div class="metric-sub">Test: {test_rmse_24h:.2f} | Δ {delta24:+.2f}</div></div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""<div class="metric-card"><div class="metric-label">Live 24h RMSE</div>
+                <div class="metric-value" style="color:#4B5563;">—</div>
+                <div class="metric-sub">resolves after 24hr</div></div>""", unsafe_allow_html=True)
+    with h48c1:
+        st.markdown(f"""<div class="metric-card"><div class="metric-label">48h Evaluated</div>
+            <div class="metric-value" style="color:#EF4444;">{evaluated_48h}</div>
+            <div class="metric-sub">predictions resolved</div></div>""", unsafe_allow_html=True)
+    with h48c2:
+        if evaluated_48h > 0:
+            live_rmse_48h = np.sqrt((log_df["error_48h"].dropna()**2).mean())
+            test_rmse_48h = float(metrics[metrics["horizon"]=="48h"]["RMSE"].values[0])
+            delta48 = live_rmse_48h - test_rmse_48h
+            dcolor48 = "#10B981" if delta48 < 5 else "#EF4444"
+            st.markdown(f"""<div class="metric-card"><div class="metric-label">Live 48h RMSE</div>
+                <div class="metric-value" style="color:{dcolor48};">{live_rmse_48h:.2f}</div>
+                <div class="metric-sub">Test: {test_rmse_48h:.2f} | Δ {delta48:+.2f}</div></div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""<div class="metric-card"><div class="metric-label">Live 48h RMSE</div>
+                <div class="metric-value" style="color:#4B5563;">—</div>
+                <div class="metric-sub">resolves after 48hr</div></div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
     st.markdown('<div class="section-header">Latest Logged Predictions</div>', unsafe_allow_html=True)
     latest_preds = log_df.sort_values("prediction_time").groupby("city").tail(1)[
-        ["city","current_datetime","current_pm25","pred_1h","pred_24h","pred_48h","actual_1h","error_1h"]
+        ["city","current_datetime","current_pm25","pred_1h","pred_24h","pred_48h",
+         "actual_1h","error_1h","actual_24h","error_24h","actual_48h","error_48h"]
     ].sort_values("current_pm25", ascending=False)
 
     def color_pm25(val):
@@ -1046,20 +1128,26 @@ elif page == "⚡ Real-Time Eval":
         use_container_width=True, hide_index=True,
     )
 
-    evaluated_df = log_df[log_df["actual_1h"].notna()].copy()
+    # ── Horizon selector for chart + per-city accuracy ────────────────────────
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    eval_horizon = st.radio("Evaluate horizon:", ["1 Hour", "24 Hours", "48 Hours"],
+                            horizontal=True, key="eval_horizon_select")
+    eval_h_map = {"1 Hour": "1h", "24 Hours": "24h", "48 Hours": "48h"}
+    eval_h = eval_h_map[eval_horizon]
+
+    evaluated_df = log_df[log_df[f"actual_{eval_h}"].notna()].copy()
     if len(evaluated_df) > 0:
-        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-header">1h Prediction vs Actual — Over Time</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="section-header">{eval_horizon} Prediction vs Actual — Over Time</div>', unsafe_allow_html=True)
 
         city_sel = st.selectbox("City", ["All"] + list(log_df["city"].unique()), key="rt_city")
         plot_df  = evaluated_df if city_sel == "All" else evaluated_df[evaluated_df["city"]==city_sel]
 
         fig = go.Figure()
         for city_name, grp in plot_df.groupby("city"):
-            fig.add_trace(go.Scatter(x=grp["current_datetime"], y=grp["actual_1h"],
+            fig.add_trace(go.Scatter(x=grp["current_datetime"], y=grp[f"actual_{eval_h}"],
                                     name=f"{city_name} Actual", mode="lines+markers",
                                     marker=dict(size=4), line=dict(width=1.5)))
-            fig.add_trace(go.Scatter(x=grp["current_datetime"], y=grp["pred_1h"],
+            fig.add_trace(go.Scatter(x=grp["current_datetime"], y=grp[f"pred_{eval_h}"],
                                     name=f"{city_name} Predicted", mode="lines",
                                     line=dict(width=1.5, dash="dot")))
         fig.update_layout(**PLOT_THEME, height=320, hovermode="x unified", yaxis_title="PM2.5 (μg/m³)",
@@ -1070,13 +1158,13 @@ elif page == "⚡ Real-Time Eval":
         city_acc = evaluated_df.groupby("city").apply(
             lambda x: pd.Series({
                 "Predictions": len(x),
-                "Live RMSE"  : round(np.sqrt((x["error_1h"]**2).mean()), 2),
-                "Live MAE"   : round(x["error_1h"].abs().mean(), 2),
+                "Live RMSE"  : round(np.sqrt((x[f"error_{eval_h}"]**2).mean()), 2),
+                "Live MAE"   : round(x[f"error_{eval_h}"].abs().mean(), 2),
             })
         ).reset_index()
         st.dataframe(city_acc, use_container_width=True, hide_index=True)
     else:
-        st.info("⏳ Actuals fill in once an hour has passed since a prediction was logged. Keep visiting Page 1 periodically.")
+        st.info(f"⏳ No {eval_horizon.lower()} predictions resolved yet. Click 'Refresh All Cities Now' after the target time has passed.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE 5 — ABOUT
