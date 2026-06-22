@@ -1,36 +1,16 @@
-"""
-AQI Forecasting Dashboard — On-Demand Architecture
-====================================================
-No background processes. Fetches live data, engineers features, predicts,
-and self-logs evaluation history entirely on-demand when the dashboard
-is opened or interacted with.
-
-HOW TO RUN:
-  pip install streamlit plotly shap matplotlib pandas numpy xgboost requests
-  streamlit run dashboard.py
-
-FOLDER STRUCTURE:
-  models/tuned_model_1h.json, tuned_model_24h.json, tuned_model_48h.json
-  data/feature_config.json
-  data/live_predictions_log.csv   (auto-created, self-logging)
-  results/test_metrics.csv
-  results/aqi_confusion_1h.csv
-  results/predictions_1h.csv, predictions_24h.csv, predictions_48h.csv
-"""
-
-import streamlit as st
-import pandas as pd
-import numpy as np
+import streamlit as st # type: ignore
+import pandas as pd # type: ignore
+import numpy as np # type: ignore
 import json
 import os
-import requests
-import xgboost as xgb
-import plotly.express as px
-import plotly.graph_objects as go
-import shap
-import matplotlib
+import requests # type: ignore
+import xgboost as xgb # type: ignore
+import plotly.express as px # type: ignore
+import plotly.graph_objects as go # type: ignore
+import shap # type: ignore
+import matplotlib # type: ignore
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt # type: ignore
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings("ignore")
@@ -318,18 +298,22 @@ def fetch_live_data(city):
             f"https://api.open-meteo.com/v1/forecast?"
             f"latitude={lat}&longitude={lon}"
             f"&start_date={start_date}&end_date={end_date}"
-            f"&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation"
+            f"&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m,"
+            f"wind_direction_10m,precipitation,surface_pressure,boundary_layer_height"
             f"&timezone=Asia/Kolkata"
         )
         wx_r = requests.get(wx_url, timeout=15).json()
         if "hourly" not in wx_r:
             raise ValueError(f"Weather API error: {wx_r.get('reason', wx_r)}")
         wx_df = pd.DataFrame({
-            "datetime"   : pd.to_datetime(wx_r["hourly"]["time"]),
-            "temperature": wx_r["hourly"]["temperature_2m"],
-            "humidity"   : wx_r["hourly"]["relative_humidity_2m"],
-            "wind_speed" : wx_r["hourly"]["wind_speed_10m"],
-            "rainfall"   : wx_r["hourly"]["precipitation"],
+            "datetime"              : pd.to_datetime(wx_r["hourly"]["time"]),
+            "temperature"           : wx_r["hourly"]["temperature_2m"],
+            "humidity"              : wx_r["hourly"]["relative_humidity_2m"],
+            "wind_speed"            : wx_r["hourly"]["wind_speed_10m"],
+            "wind_direction"        : wx_r["hourly"]["wind_direction_10m"],
+            "rainfall"              : wx_r["hourly"]["precipitation"],
+            "surface_pressure"      : wx_r["hourly"]["surface_pressure"],
+            "boundary_layer_height" : wx_r["hourly"]["boundary_layer_height"],
         })
 
         df = pd.merge(aqi_df, wx_df, on="datetime", how="inner")
@@ -360,6 +344,31 @@ def engineer_features(df):
     df["humidity_pm25"]         = df["humidity"] * df["pm2_5"]
     df["wind_pm25_ratio"]       = df["pm2_5"] / (df["wind_speed"] + 1)
     df["temp_wind_interaction"] = df["temperature"] * df["wind_speed"]
+
+    # ── New meteorological features ───────────────────────────
+    if "wind_direction" in df.columns:
+        df["wind_dir_sin"] = np.sin(np.radians(df["wind_direction"]))
+        df["wind_dir_cos"] = np.cos(np.radians(df["wind_direction"]))
+    else:
+        df["wind_dir_sin"] = 0.0
+        df["wind_dir_cos"] = 0.0
+
+    if "boundary_layer_height" in df.columns:
+        df["blh_inverse"]          = 1 / (df["boundary_layer_height"] + 1)
+        df["blh_pm25_interaction"] = df["pm2_5"] / (df["boundary_layer_height"] + 1)
+        df["blh_rolling6_min"]     = df["boundary_layer_height"].rolling(6, min_periods=1).min()
+    else:
+        df["blh_inverse"]          = 0.0
+        df["blh_pm25_interaction"] = 0.0
+        df["blh_rolling6_min"]     = 0.0
+
+    if "surface_pressure" in df.columns:
+        df["pressure_change_1h"] = df["surface_pressure"].diff(1).fillna(0)
+        df["pressure_change_6h"] = df["surface_pressure"].diff(6).fillna(0)
+    else:
+        df["pressure_change_1h"] = 0.0
+        df["pressure_change_6h"] = 0.0
+
     city_mean = df["pm2_5"].mean()
     city_std  = df["pm2_5"].std()
     df["is_pollution_spike"]  = (df["pm2_5"] > city_mean + 2 * city_std).astype(int)
