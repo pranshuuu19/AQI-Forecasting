@@ -1,16 +1,36 @@
-import streamlit as st # type: ignore
-import pandas as pd # type: ignore
-import numpy as np # type: ignore
+"""
+AQI Forecasting Dashboard — On-Demand Architecture
+====================================================
+No background processes. Fetches live data, engineers features, predicts,
+and self-logs evaluation history entirely on-demand when the dashboard
+is opened or interacted with.
+
+HOW TO RUN:
+  pip install streamlit plotly shap matplotlib pandas numpy xgboost requests
+  streamlit run dashboard.py
+
+FOLDER STRUCTURE:
+  models/tuned_model_1h.json, tuned_model_24h.json, tuned_model_48h.json
+  data/feature_config.json
+  data/live_predictions_log.csv   (auto-created, self-logging)
+  results/test_metrics.csv
+  results/aqi_confusion_1h.csv
+  results/predictions_1h.csv, predictions_24h.csv, predictions_48h.csv
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
 import json
 import os
-import requests # type: ignore
-import xgboost as xgb # type: ignore
-import plotly.express as px # type: ignore
-import plotly.graph_objects as go # type: ignore
-import shap # type: ignore
-import matplotlib # type: ignore
+import requests
+import xgboost as xgb
+import plotly.express as px
+import plotly.graph_objects as go
+import shap
+import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt # type: ignore
+import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings("ignore")
@@ -461,9 +481,12 @@ def log_prediction(city, current_dt, current_pm25, pred_1h, pred_24h, pred_48h):
 
     if os.path.exists(LIVE_LOG_PATH):
         existing = pd.read_csv(LIVE_LOG_PATH)
-        # Avoid duplicate logging for same city + same current_datetime
-        dup_mask = (existing["city"] == city) & (existing["current_datetime"] == new_row["current_datetime"].iloc[0])
+        # Check for duplicate — same city + same current_datetime
+        dup_mask = (existing["city"] == city) & \
+                   (existing["current_datetime"] == new_row["current_datetime"].iloc[0])
         if dup_mask.any():
+            # Don't add a new row — just return existing log as-is
+            # Actuals will be filled by evaluate_past_predictions separately
             return existing
         combined = pd.concat([existing, new_row], ignore_index=True)
     else:
@@ -497,7 +520,7 @@ def evaluate_past_predictions(live_df_by_city):
 
             city_data["time_diff"] = (city_data["datetime"] - target_time).abs()
             closest = city_data.nsmallest(1, "time_diff")
-            if len(closest) > 0 and closest.iloc[0]["time_diff"] < timedelta(minutes=61):
+            if len(closest) > 0 and closest.iloc[0]["time_diff"] < timedelta(minutes=5):
                 actual = round(float(closest.iloc[0]["pm2_5"]), 2)
                 error  = round(float(row[f"pred_{horizon}"]) - actual, 2)
                 log_df.at[idx, f"actual_{horizon}"] = actual
@@ -589,14 +612,29 @@ if page == "🔮 Live Forecast":
 
     featured = engineer_features(live_df)
     latest   = featured.iloc[-1]
-    for f in FEATURES:
+
+    # Get exact feature names the model was trained on directly from the model
+    # This is the safest approach — model itself knows what it expects
+    model_features = models["1h"].get_booster().feature_names if "1h" in models else FEATURES
+
+    for f in model_features:
         if f not in featured.columns:
             featured[f] = 0
-    x_input = pd.DataFrame([featured.iloc[-1][FEATURES]]).fillna(0)
+    x_input = pd.DataFrame([featured.iloc[-1][model_features]]).fillna(0)
 
     pred_1h  = float(models["1h"].predict(x_input)[0])  if "1h"  in models else None
-    pred_24h = float(models["24h"].predict(x_input)[0]) if "24h" in models else None
-    pred_48h = float(models["48h"].predict(x_input)[0]) if "48h" in models else None
+
+    # Build separate aligned inputs for 24h and 48h models
+    mf24 = models["24h"].get_booster().feature_names if "24h" in models else model_features
+    mf48 = models["48h"].get_booster().feature_names if "48h" in models else model_features
+    for f in mf24:
+        if f not in featured.columns: featured[f] = 0
+    for f in mf48:
+        if f not in featured.columns: featured[f] = 0
+    x24 = pd.DataFrame([featured.iloc[-1][mf24]]).fillna(0)
+    x48 = pd.DataFrame([featured.iloc[-1][mf48]]).fillna(0)
+    pred_24h = float(models["24h"].predict(x24)[0]) if "24h" in models else None
+    pred_48h = float(models["48h"].predict(x48)[0]) if "48h" in models else None
 
     current_pm25 = float(latest["pm2_5"])
     cur_label, cur_color, cur_bg, cur_emoji = get_aqi_level(current_pm25)
@@ -1025,13 +1063,23 @@ elif page == "⚡ Real-Time Eval":
                         try:
                             featured_c = engineer_features(cdf)
                             latest_c   = featured_c.iloc[-1]
-                            for f in FEATURES:
+                            model_features_c = models["1h"].get_booster().feature_names if "1h" in models else FEATURES
+                            for f in model_features_c:
                                 if f not in featured_c.columns:
                                     featured_c[f] = 0
-                            x_c = pd.DataFrame([featured_c.iloc[-1][FEATURES]]).fillna(0)
+                            x_c = pd.DataFrame([featured_c.iloc[-1][model_features_c]]).fillna(0)
                             p1  = float(models["1h"].predict(x_c)[0])  if "1h"  in models else None
-                            p24 = float(models["24h"].predict(x_c)[0]) if "24h" in models else None
-                            p48 = float(models["48h"].predict(x_c)[0]) if "48h" in models else None
+                            # Use same feature alignment for 24h and 48h models
+                            mf24 = models["24h"].get_booster().feature_names if "24h" in models else FEATURES
+                            mf48 = models["48h"].get_booster().feature_names if "48h" in models else FEATURES
+                            for f in mf24:
+                                if f not in featured_c.columns: featured_c[f] = 0
+                            for f in mf48:
+                                if f not in featured_c.columns: featured_c[f] = 0
+                            x24 = pd.DataFrame([featured_c.iloc[-1][mf24]]).fillna(0)
+                            x48 = pd.DataFrame([featured_c.iloc[-1][mf48]]).fillna(0)
+                            p24 = float(models["24h"].predict(x24)[0]) if "24h" in models else None
+                            p48 = float(models["48h"].predict(x48)[0]) if "48h" in models else None
                             log_prediction(c, latest_c["datetime"], float(latest_c["pm2_5"]), p1, p24, p48)
                         except Exception as e:
                             pass  # skip logging for this city if feature engineering fails
@@ -1121,11 +1169,11 @@ elif page == "⚡ Real-Time Eval":
                 <div class="metric-sub">resolves after 48hr</div></div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-header">Latest Logged Predictions</div>', unsafe_allow_html=True)
-    latest_preds = log_df.sort_values("prediction_time").groupby("city").tail(1)[
+    st.markdown('<div class="section-header">Latest Logged Predictions (Last 2 per city)</div>', unsafe_allow_html=True)
+    latest_preds = log_df.sort_values("prediction_time").groupby("city").tail(2)[
         ["city","current_datetime","current_pm25","pred_1h","pred_24h","pred_48h",
          "actual_1h","error_1h","actual_24h","error_24h","actual_48h","error_48h"]
-    ].sort_values("current_pm25", ascending=False)
+    ].sort_values(["city","current_datetime"], ascending=[True, False])
 
     def color_pm25(val):
         if pd.isna(val): return ""
