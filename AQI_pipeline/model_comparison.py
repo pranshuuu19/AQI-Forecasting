@@ -1,34 +1,14 @@
-"""
-model_comparison.py
-
-Compares Linear Regression and Random Forest against the project's existing
-tuned XGBoost models, using the identical chronological train/test split and
-feature set the XGBoost models were trained on (data/train.csv, data/test.csv,
-data/feature_config.json).
-
-This exists to answer one interview question with real numbers instead of an
-assertion: "why XGBoost over simpler alternatives?"
-
-Run from the project root:
-    python AQI_pipeline/model_comparison.py
-
-Outputs:
-    results/model_comparison.csv   — metrics table (model x horizon)
-    results/model_comparison.png   — RMSE bar chart, grouped by horizon
-"""
-
 import json
 import os
-
-import numpy as np
-import pandas as pd
-import xgboost as xgb
-import matplotlib
+import numpy as np # type: ignore
+import pandas as pd # type: ignore
+import xgboost as xgb # type: ignore
+import matplotlib # type: ignore
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import matplotlib.pyplot as plt # type: ignore
+from sklearn.linear_model import LinearRegression # type: ignore
+from sklearn.ensemble import RandomForestRegressor # type: ignore
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score # type: ignore
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DATA_DIR   = "data"
