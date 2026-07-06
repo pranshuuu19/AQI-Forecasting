@@ -2,7 +2,7 @@
 
 An end-to-end machine learning system that forecasts PM2.5 air quality 1, 24, and 48 hours ahead for 5 major Indian cities, served through a live Streamlit dashboard with confidence intervals and SHAP-based explainability.
 
-**Live demo:** _add your Streamlit Cloud link here once deployed_
+**Live demo:** [aqi-forecasting-2b3fjukvhb3o7jzhwz2ckc.streamlit.app](https://aqi-forecasting-2b3fjukvhb3o7jzhwz2ckc.streamlit.app)
 
 ---
 
@@ -14,6 +14,8 @@ An end-to-end machine learning system that forecasts PM2.5 air quality 1, 24, an
 - Wraps each prediction with an 80% confidence interval from quantile regression models
 - Explains every prediction with SHAP, translated into a plain-English narrative
 - Self-logs every prediction it makes and automatically checks itself against the real outcome once the target time passes — a lightweight live model-monitoring loop
+- Exposes the same predictions through a small FastAPI backend (`GET /predict/{city}`), independent of the Streamlit UI
+- Benchmarked against Linear Regression and Random Forest baselines on the same test set — XGBoost is the best or tied-best model at every horizon, with its advantage growing at longer horizons (24h/48h) where the underlying relationships are more nonlinear (see `results/model_comparison.csv`)
 
 ## Cities covered
 
@@ -31,7 +33,7 @@ Quantile interval coverage: ~87% (1h), ~88% (24h/48h) for the target 80% band.
 
 ## Tech stack
 
-Python · XGBoost · SHAP · Optuna · Streamlit · Plotly · Open-Meteo API (free, no API key)
+Python · XGBoost · SHAP · Optuna · Streamlit · FastAPI · Plotly · scikit-learn · Open-Meteo API (free, no API key)
 
 ## Architecture
 
@@ -57,21 +59,30 @@ Each horizon is modeled independently rather than as a single multi-output model
 ```
 AQI_project/
 ├── dashboard.py                 # Main Streamlit app (5 pages)
+├── main.py                      # FastAPI backend (GET /health, GET /predict/{city})
+├── predictor.py                 # Shared prediction logic (used by both dashboard and API)
 ├── src/                         # Data fetching + feature engineering
-├── AQI_pipeline/                # Training pipeline (split, tune, train, evaluate, SHAP)
+├── AQI_pipeline/                # Training pipeline (split, tune, train, evaluate, SHAP, model comparison)
 ├── models/                      # Trained XGBoost models (point + quantile)
 ├── data/                        # Feature config, split summary
-└── results/                     # Test metrics, predictions, SHAP plots
+└── results/                     # Test metrics, predictions, SHAP plots, model comparison
 ```
 
 ## Running locally
 
+**Dashboard:**
 ```bash
 git clone https://github.com/pranshuuu19/AQI-Forecasting.git
 cd AQI-Forecasting
 pip install -r requirements.txt
 streamlit run dashboard.py
 ```
+
+**API (optional, runs independently of the dashboard):**
+```bash
+uvicorn main:app --reload
+```
+Then visit `http://127.0.0.1:8000/docs` for interactive API docs.
 
 ## Dashboard pages
 
