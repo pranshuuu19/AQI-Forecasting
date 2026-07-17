@@ -3,6 +3,8 @@ import pandas as pd # type: ignore
 import numpy as np # type: ignore
 import json
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import requests # type: ignore
 import xgboost as xgb # type: ignore
 import plotly.express as px # type: ignore
@@ -73,7 +75,6 @@ CITIES = {
     "Kolkata"  : (22.5726, 88.3639),
 }
 
-LIVE_LOG_PATH = "data/live_predictions_log.csv"
 
 PLOT_THEME = dict(
     paper_bgcolor="rgba(0,0,0,0)",
@@ -162,6 +163,7 @@ def load_static_data():
     p48h = pd.read_csv("results/predictions_48h.csv", parse_dates=["datetime"])
     return config, metrics, confusion, p1h, p24h, p48h
 
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_live_data(city):
     lat, lon = CITIES[city]
     now_ist    = datetime.utcnow() + timedelta(hours=5, minutes=30)
@@ -308,75 +310,106 @@ def get_quantile_pred(h, q, featured):
     except Exception as e:
         return None
 
+import prediction_log as plog
+
+def get_database_url():
+    """Checks os.environ first (local dev via .env / shell), then falls back
+    to st.secrets (Streamlit Community Cloud's secrets manager)."""
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    try:
+        return st.secrets["DATABASE_URL"]
+    except Exception:
+        return None
+
+_DATABASE_URL = get_database_url()
+if not _DATABASE_URL:
+    st.error(
+        "DATABASE_URL not found.\n\n"
+        "- Running locally? Add DATABASE_URL to a .env file or export it in your shell.\n"
+        "- Running on Streamlit Community Cloud? Add it under your app's "
+        "**Settings -> Secrets**."
+    )
+    st.stop()
+
+@st.cache_resource
+def get_db_connection():
+    """
+    One Postgres connection, reused across reruns within the same app
+    instance instead of opening a fresh connection (with its own TCP+TLS
+    handshake) on every single click/interaction. st.cache_resource is the
+    right tool for this — it's designed for exactly this kind of
+    non-serializable, expensive-to-create resource.
+    """
+    import psycopg2
+    return psycopg2.connect(_DATABASE_URL)
+
+def get_live_conn():
+    """Returns the cached connection, transparently reconnecting if Supabase
+    has silently closed it for being idle too long."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.close()
+    except Exception:
+        get_db_connection.clear()
+        conn = get_db_connection()
+    return conn
+
+plog.init_log_table(conn=get_live_conn())
+
 def log_prediction(city, current_dt, current_pm25, pred_1h, pred_24h, pred_48h,
                     lower_1h=None, upper_1h=None, lower_24h=None, upper_24h=None,
                     lower_48h=None, upper_48h=None):
-    os.makedirs("data", exist_ok=True)
-    new_row = pd.DataFrame([{
-        "prediction_time" : (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S"),
-        "city": city, "current_datetime": current_dt.strftime("%Y-%m-%d %H:%M:%S"),
-        "current_pm25": round(current_pm25, 2),
-        "target_time_1h":  (current_dt + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
-        "target_time_24h": (current_dt + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S"),
-        "target_time_48h": (current_dt + timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S"),
-        "pred_1h":  round(pred_1h,  2) if pred_1h  else None,
-        "pred_24h": round(pred_24h, 2) if pred_24h else None,
-        "pred_48h": round(pred_48h, 2) if pred_48h else None,
-        "lower_1h":  round(lower_1h, 2)  if lower_1h  else None,
-        "upper_1h":  round(upper_1h, 2)  if upper_1h  else None,
-        "lower_24h": round(lower_24h, 2) if lower_24h else None,
-        "upper_24h": round(upper_24h, 2) if upper_24h else None,
-        "lower_48h": round(lower_48h, 2) if lower_48h else None,
-        "upper_48h": round(upper_48h, 2) if upper_48h else None,
-        "actual_1h": None, "actual_24h": None, "actual_48h": None,
-        "error_1h":  None, "error_24h":  None, "error_48h":  None,
-    }])
-    if os.path.exists(LIVE_LOG_PATH):
-        existing = pd.read_csv(LIVE_LOG_PATH)
-        dup_mask = (existing["city"] == city) & (existing["current_datetime"] == new_row["current_datetime"].iloc[0])
-        if dup_mask.any():
-            return existing
-        combined = pd.concat([existing, new_row], ignore_index=True)
-    else:
-        combined = new_row
-    combined.to_csv(LIVE_LOG_PATH, index=False)
-    return combined
+    plog.log_prediction(city, current_dt, current_pm25, pred_1h, pred_24h, pred_48h,
+                         lower_1h, upper_1h, lower_24h, upper_24h, lower_48h, upper_48h,
+                         conn=get_live_conn())
 
 def evaluate_past_predictions(live_df_by_city):
-    if not os.path.exists(LIVE_LOG_PATH): return
-    log_df = pd.read_csv(LIVE_LOG_PATH)
-    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    changed = False
-    for idx, row in log_df.iterrows():
-        city = row["city"]
-        if city not in live_df_by_city: continue
-        city_data = live_df_by_city[city].copy()
-        city_data["datetime"] = pd.to_datetime(city_data["datetime"])
-        for horizon in ["1h", "24h", "48h"]:
-            if pd.notna(row.get(f"actual_{horizon}")) or pd.isna(row.get(f"pred_{horizon}")): continue
-            target_time = pd.to_datetime(row[f"target_time_{horizon}"])
-            if target_time > now_ist: continue
-            city_data["time_diff"] = (city_data["datetime"] - target_time).abs()
-            closest = city_data.nsmallest(1, "time_diff")
-            if len(closest) > 0 and closest.iloc[0]["time_diff"] < timedelta(minutes=5):
-                actual = round(float(closest.iloc[0]["pm2_5"]), 2)
-                error  = round(float(row[f"pred_{horizon}"]) - actual, 2)
-                log_df.at[idx, f"actual_{horizon}"] = actual
-                log_df.at[idx, f"error_{horizon}"]  = error
-                changed = True
-    if changed:
-        log_df.to_csv(LIVE_LOG_PATH, index=False)
+    plog.evaluate_past_predictions(live_df_by_city, conn=get_live_conn())
 
 @st.cache_data(ttl=60)
 def load_live_log():
-    if os.path.exists(LIVE_LOG_PATH):
-        df = pd.read_csv(LIVE_LOG_PATH)
-        df["prediction_time"]  = pd.to_datetime(df["prediction_time"])
-        df["current_datetime"] = pd.to_datetime(df["current_datetime"])
-        return df
-    return pd.DataFrame()
+    return plog.load_live_log(conn=get_live_conn())
 
 models = load_models()
+
+def resolve_all_pending_actuals():
+    """
+    Lazy evaluation: fetches live data for all 5 cities and resolves any
+    predictions whose target time has passed. This replaces any need for
+    an external cron/scheduler — a dashboard visit is the trigger.
+
+    Throttled to run at most once per 10 minutes PER BROWSER SESSION via
+    st.session_state — without this, Streamlit's rerun-on-every-interaction
+    behavior would trigger this (and its 5-city fetch + DB round-trip) on
+    every single click, which is what made the app slow. fetch_live_data()
+    is separately cached too (ttl=600s), so this throttle and that cache
+    reinforce each other rather than duplicating protection.
+
+    Known limitation: fetch_live_data only pulls ~6 days of history, so a
+    prediction that goes unresolved for longer than that may fall outside
+    the fetch window by the time someone visits, and would stay
+    unresolved. Fine for normal/periodic use; not a hard scheduling
+    guarantee.
+    """
+    last_run = st.session_state.get("last_actuals_check")
+    now = datetime.utcnow()
+    if last_run and (now - last_run) < timedelta(minutes=10):
+        return  # checked recently enough this session, skip
+
+    all_city_data = {}
+    for c in CITIES.keys():
+        cdf, cerr = fetch_live_data(c)
+        if cdf is not None and len(cdf) > 0:
+            all_city_data[c] = cdf
+    if all_city_data:
+        evaluate_past_predictions(all_city_data)
+    st.session_state["last_actuals_check"] = now
+
+resolve_all_pending_actuals()
 config, metrics, confusion, p1h, p24h, p48h = load_static_data()
 FEATURES = config["feature_cols"]
 

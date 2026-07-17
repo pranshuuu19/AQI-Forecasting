@@ -8,3 +8,5 @@ shap
 matplotlib
 fastapi
 uvicorn
+psycopg2-binarypython-dotenv
+python-dotenv

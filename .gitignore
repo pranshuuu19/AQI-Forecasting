@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 aqi_env/
+.env
 
 # Raw/intermediate data (large, regenerable)
 data/raw/
@@ -11,7 +12,7 @@ data/train.csv
 data/val.csv
 data/test.csv
 
-# Runtime-generated log (grows every dashboard session — don't track)
+# Runtime-generated log — no longer used (migrated to Postgres), left excluded just in case
 data/live_predictions_log.csv
 
 # SHAP intermediate values (large, regenerable — keep the plots though)
