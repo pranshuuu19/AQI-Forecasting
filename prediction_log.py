@@ -1,21 +1,8 @@
-"""
-prediction_log.py
-
-Persistent (PostgreSQL-backed) storage for the AQI dashboard's live
-prediction log and self-evaluation loop.
-
-Every function accepts an optional `conn` parameter — if the caller passes
-an existing connection (e.g. a cached one from Streamlit), it's reused and
-NOT closed here (the caller owns its lifecycle). If no conn is passed, a
-fresh one is opened and closed internally, same as before — this keeps
-standalone scripts (no Streamlit involved) working unchanged.
-"""
-
 import os
 from datetime import datetime, timedelta
 
-import pandas as pd
-import psycopg2
+import pandas as pd # type: ignore
+import psycopg2 # type: ignore
 
 
 def get_database_url():

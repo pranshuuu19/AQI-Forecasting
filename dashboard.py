@@ -3,7 +3,7 @@ import pandas as pd # type: ignore
 import numpy as np # type: ignore
 import json
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv #type: ignore
 load_dotenv()
 import requests # type: ignore
 import xgboost as xgb # type: ignore

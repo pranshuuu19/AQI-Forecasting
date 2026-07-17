@@ -1,18 +1,8 @@
-"""
-predictor.py
-
-Reusable prediction logic extracted from dashboard.py so it can be shared
-between the Streamlit dashboard and the FastAPI backend (main.py).
-
-No Streamlit imports here on purpose — this module should be usable from
-any context (dashboard, API, notebook, script).
-"""
-
 import os
-import numpy as np
-import pandas as pd
-import requests
-import xgboost as xgb
+import numpy as np # type: ignore
+import pandas as pd # type: ignore
+import requests # type: ignore
+import xgboost as xgb # type: ignore
 from datetime import datetime, timedelta
 
 CITIES = {
