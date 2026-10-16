@@ -333,46 +333,81 @@ if not _DATABASE_URL:
     )
     st.stop()
 
+_DB_CONN_ERROR = None
+
 @st.cache_resource
 def get_db_connection():
     """
     One Postgres connection, reused across reruns within the same app
-    instance instead of opening a fresh connection (with its own TCP+TLS
-    handshake) on every single click/interaction. st.cache_resource is the
-    right tool for this — it's designed for exactly this kind of
-    non-serializable, expensive-to-create resource.
+    instance instead of opening a fresh connection on every click.
     """
-    import psycopg2
-    return psycopg2.connect(_DATABASE_URL)
+    global _DB_CONN_ERROR
+    try:
+        import psycopg2
+        conn = psycopg2.connect(_DATABASE_URL, connect_timeout=5)
+        _DB_CONN_ERROR = None
+        return conn
+    except Exception as e:
+        _DB_CONN_ERROR = str(e)
+        return None
 
 def get_live_conn():
-    """Returns the cached connection, transparently reconnecting if Supabase
-    has silently closed it for being idle too long."""
+    """Returns the cached connection, transparently reconnecting if needed."""
+    global _DB_CONN_ERROR
     conn = get_db_connection()
+    if conn is None:
+        return None
     try:
         cur = conn.cursor()
         cur.execute("SELECT 1")
         cur.close()
     except Exception:
         get_db_connection.clear()
-        conn = get_db_connection()
+        try:
+            conn = get_db_connection()
+        except Exception as e:
+            _DB_CONN_ERROR = str(e)
+            return None
     return conn
 
-plog.init_log_table(conn=get_live_conn())
+_initial_conn = get_live_conn()
+if _initial_conn is not None:
+    try:
+        plog.init_log_table(conn=_initial_conn)
+    except Exception as e:
+        _DB_CONN_ERROR = str(e)
 
 def log_prediction(city, current_dt, current_pm25, pred_1h, pred_24h, pred_48h,
                     lower_1h=None, upper_1h=None, lower_24h=None, upper_24h=None,
                     lower_48h=None, upper_48h=None):
-    plog.log_prediction(city, current_dt, current_pm25, pred_1h, pred_24h, pred_48h,
-                         lower_1h, upper_1h, lower_24h, upper_24h, lower_48h, upper_48h,
-                         conn=get_live_conn())
+    conn = get_live_conn()
+    if conn is None:
+        return
+    try:
+        plog.log_prediction(city, current_dt, current_pm25, pred_1h, pred_24h, pred_48h,
+                             lower_1h, upper_1h, lower_24h, upper_24h, lower_48h, upper_48h,
+                             conn=conn)
+    except Exception:
+        pass
 
 def evaluate_past_predictions(live_df_by_city):
-    plog.evaluate_past_predictions(live_df_by_city, conn=get_live_conn())
+    conn = get_live_conn()
+    if conn is None:
+        return
+    try:
+        plog.evaluate_past_predictions(live_df_by_city, conn=conn)
+    except Exception:
+        pass
 
 @st.cache_data(ttl=60)
 def load_live_log():
-    return plog.load_live_log(conn=get_live_conn())
+    conn = get_live_conn()
+    if conn is None:
+        return pd.DataFrame()
+    try:
+        return plog.load_live_log(conn=conn)
+    except Exception:
+        return pd.DataFrame()
 
 models = load_models()
 
@@ -806,6 +841,20 @@ elif page == "⚡ Real-Time Eval":
                 load_live_log.clear()
             st.success("Refreshed — new predictions logged and actuals updated.")
             st.rerun()
+
+    if _DB_CONN_ERROR:
+        st.warning(
+            "⚠️ **Database Paused or Unreachable**\n\n"
+            f"**Error Details:** `{_DB_CONN_ERROR}`\n\n"
+            "**Why this happens:** Supabase free-tier projects automatically pause after 7 days of inactivity. When paused, the connection pooler cannot find the tenant and returns `tenant/user not found`.\n\n"
+            "👉 **How to fix:**\n"
+            "1. Visit [supabase.com/dashboard](https://supabase.com/dashboard)\n"
+            "2. Select your project (`zjzmsgnmcqnjrggiszsb`)\n"
+            "3. Click **Restore project** (takes ~1-2 minutes)\n"
+            "4. Refresh this dashboard once restored!\n\n"
+            "*(All other pages like Live Forecast, Model Performance, and Historical Analysis continue to work normally).* "
+        )
+        st.stop()
 
     log_df = load_live_log()
     if log_df.empty:
